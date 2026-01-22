@@ -7,15 +7,21 @@ import os
 
 app = FastAPI()
 
-class ResolveRequest(BaseModel):
+class VideoRequest(BaseModel):
     url: str
+
+class ProfileRequest(BaseModel):
+    profile_url: str
+    limit: int = 5   # SAFE DEFAULT
 
 @app.get("/")
 def root():
     return {"status": "backend running"}
 
+# -------- SINGLE VIDEO DOWNLOAD --------
+
 @app.post("/resolve")
-def resolve_and_download(data: ResolveRequest):
+def resolve_video(data: VideoRequest):
     try:
         temp_dir = tempfile.mkdtemp()
 
@@ -32,14 +38,11 @@ def resolve_and_download(data: ResolveRequest):
         filename = ydl.prepare_filename(info)
 
         if not os.path.exists(filename):
-            raise Exception("Video file not found after download")
+            raise Exception("Video not downloaded")
 
-        def file_iterator():
+        def stream():
             with open(filename, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)  # 1MB chunks
-                    if not chunk:
-                        break
+                while chunk := f.read(1024 * 1024):
                     yield chunk
             try:
                 os.remove(filename)
@@ -47,15 +50,42 @@ def resolve_and_download(data: ResolveRequest):
             except Exception:
                 pass
 
-        headers = {
-            "Content-Disposition": f'attachment; filename="{os.path.basename(filename)}"'
+        return StreamingResponse(
+            stream(),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": f'attachment; filename="{os.path.basename(filename)}"'
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# -------- PROFILE SCRAPER (SAFE MODE) --------
+
+@app.post("/profile")
+def scrape_profile(data: ProfileRequest):
+    try:
+        ydl_opts = {
+            "quiet": True,
+            "extract_flat": True,
+            "skip_download": True,
+            "playlistend": data.limit
         }
 
-        return StreamingResponse(
-            file_iterator(),
-            media_type="video/mp4",
-            headers=headers
-        )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(data.profile_url, download=False)
+
+        videos = []
+
+        for entry in info.get("entries", []):
+            if entry.get("url"):
+                videos.append(entry["url"])
+
+        return {
+            "count": len(videos),
+            "videos": videos
+        }
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
