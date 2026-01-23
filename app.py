@@ -1,103 +1,119 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
-import tempfile
+import json
 import os
+import tempfile
 
 app = FastAPI()
 
 
-# ======================
+# =========================
 # MODELS
-# ======================
+# =========================
 
 class ProfileRequest(BaseModel):
     profile_url: str
 
-class VideoRequest(BaseModel):
-    url: str
-    quality: str = "best"
 
-
-# ======================
-# HEALTH
-# ======================
+# =========================
+# HEALTH CHECK
+# =========================
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {"status": "backend running"}
 
 
-# ======================
-# FETCH ALL VIDEOS
-# ======================
+# =========================
+# STREAM PROFILE VIDEOS
+# =========================
+# This endpoint streams progress line-by-line
+# Frontend reads it and updates progress bar
+# =========================
 
-@app.post("/profile/all")
-def fetch_all_videos(data: ProfileRequest):
-    try:
+@app.post("/profile/stream")
+def stream_profile(data: ProfileRequest):
+
+    def generator():
         ydl_opts = {
             "quiet": True,
             "extract_flat": True,
-            "skip_download": True
+            "skip_download": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(data.profile_url, download=False)
+            entries = info.get("entries", [])
 
-        videos = []
-        for e in info.get("entries", []):
-            if e.get("url"):
-                videos.append(e["url"])
+            total = len(entries)
 
-        return {
-            "count": len(videos),
-            "videos": videos
-        }
+            for idx, entry in enumerate(entries, start=1):
+                video_url = entry.get("url")
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+                payload = {
+                    "current": idx,
+                    "total": total,
+                    "url": video_url
+                }
+
+                # Send progress update
+                yield json.dumps(payload) + "\n"
+
+    return StreamingResponse(generator(), media_type="text/plain")
 
 
-# ======================
-# DOWNLOAD SINGLE VIDEO
-# ======================
+# =========================
+# SINGLE VIDEO DOWNLOAD
+# =========================
+# Browser will call this repeatedly (one-by-one)
+# Minimal RAM usage, streaming file
+# =========================
 
-@app.post("/download")
-def download_video(data: VideoRequest):
+@app.get("/download")
+def download_video(
+    url: str = Query(...),
+    n: int = Query(...)
+):
     try:
-        tmp = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp()
 
         ydl_opts = {
-            "outtmpl": f"{tmp}/%(id)s.%(ext)s",
-            "format": data.quality,
+            "outtmpl": os.path.join(temp_dir, f"{n}.%(ext)s"),
+            "format": "best",
             "merge_output_format": "mp4",
             "quiet": True,
-            "noplaylist": True
+            "noplaylist": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(data.url, download=True)
-            file_path = ydl.prepare_filename(info)
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
 
-        if not os.path.exists(file_path):
+        if not os.path.exists(filename):
             raise Exception("Download failed")
 
-        def stream():
-            with open(file_path, "rb") as f:
-                while chunk := f.read(1024 * 1024):
+        def file_stream():
+            with open(filename, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)  # 1MB
+                    if not chunk:
+                        break
                     yield chunk
+
+            # Cleanup
             try:
-                os.remove(file_path)
-                os.rmdir(tmp)
+                os.remove(filename)
+                os.rmdir(temp_dir)
             except Exception:
                 pass
 
         return StreamingResponse(
-            stream(),
+            file_stream(),
             media_type="video/mp4",
             headers={
-                "Content-Disposition": f'attachment; filename="{os.path.basename(file_path)}"'
+                "Content-Disposition": f'attachment; filename="{n}.mp4"'
             }
         )
 
