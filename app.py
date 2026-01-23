@@ -12,16 +12,19 @@ app = FastAPI()
 # MODELS
 # =========================
 
+class ProfileRequest(BaseModel):
+    profile_url: str
+
 class DownloadRequest(BaseModel):
     url: str
     index: int
-    quality: str = "best"   # best | 720p | 480p
+    quality: str = "best"
 
 # =========================
 # HELPERS
 # =========================
 
-def select_format(quality: str) -> str:
+def select_format(quality: str):
     if quality == "720p":
         return "bestvideo[height<=720]+bestaudio/best[height<=720]"
     if quality == "480p":
@@ -29,12 +32,43 @@ def select_format(quality: str) -> str:
     return "best"
 
 # =========================
-# HEALTH CHECK
+# HEALTH
 # =========================
 
 @app.get("/")
 def health():
     return {"status": "backend running"}
+
+# =========================
+# FETCH ALL PROFILE VIDEOS
+# =========================
+
+@app.post("/profile/all")
+def fetch_all_profile_videos(data: ProfileRequest):
+    try:
+        ydl_opts = {
+            "quiet": True,
+            "extract_flat": True,
+            "skip_download": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(data.profile_url, download=False)
+
+        entries = info.get("entries", [])
+        videos = []
+
+        for e in entries:
+            if e.get("url"):
+                videos.append(e["url"])
+
+        return {
+            "total": len(videos),
+            "videos": videos
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # =========================
 # DOWNLOAD SINGLE VIDEO
@@ -49,9 +83,8 @@ def download_video(data: DownloadRequest):
             "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
             "format": select_format(data.quality),
             "merge_output_format": "mp4",
-            "noplaylist": True,
             "quiet": True,
-            "no_warnings": True,
+            "noplaylist": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -59,23 +92,18 @@ def download_video(data: DownloadRequest):
             file_path = ydl.prepare_filename(info)
 
         if not os.path.exists(file_path):
-            raise Exception("Video download failed")
+            raise Exception("Download failed")
 
         output_name = f"{data.index}.mp4"
 
-        def stream_file():
+        def stream():
             with open(file_path, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)  # 1MB chunks
-                    if not chunk:
-                        break
+                while chunk := f.read(1024 * 1024):
                     yield chunk
-
-            # cleanup after stream
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
         return StreamingResponse(
-            stream_file(),
+            stream(),
             media_type="video/mp4",
             headers={
                 "Content-Disposition": f'attachment; filename="{output_name}"'
