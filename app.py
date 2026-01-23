@@ -1,13 +1,13 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
 import tempfile
-import subprocess
 import os
-import json
+from typing import List
 
 app = FastAPI()
+
 
 # =========================
 # MODELS
@@ -15,6 +15,10 @@ app = FastAPI()
 
 class ProfileRequest(BaseModel):
     profile_url: str
+
+class VideoDownloadRequest(BaseModel):
+    url: str
+    quality: str = "best"
 
 
 # =========================
@@ -27,13 +31,12 @@ def health():
 
 
 # =========================
-# PROFILE STREAM (unchanged)
+# SCRAPE ALL VIDEOS FROM PROFILE
 # =========================
 
-@app.post("/profile/stream")
-def stream_profile(data: ProfileRequest):
-
-    def generator():
+@app.post("/profile/all")
+def scrape_all_videos(data: ProfileRequest):
+    try:
         ydl_opts = {
             "quiet": True,
             "extract_flat": True,
@@ -42,92 +45,52 @@ def stream_profile(data: ProfileRequest):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(data.profile_url, download=False)
-            entries = info.get("entries", [])
-            total = len(entries)
 
-            for i, e in enumerate(entries, start=1):
-                if not e.get("url"):
-                    continue
+        videos = []
+        for entry in info.get("entries", []):
+            if entry.get("url"):
+                videos.append(entry["url"])
 
-                yield json.dumps({
-                    "current": i,
-                    "total": total,
-                    "url": e["url"]
-                }) + "\n"
+        return {
+            "total": len(videos),
+            "videos": videos
+        }
 
-    return StreamingResponse(generator(), media_type="text/plain")
-
-
-# =========================
-# FILTER MAP
-# =========================
-
-FILTERS = {
-    "none": None,
-    "bw": "format=gray",
-    "mirror": "hflip",
-    "bw_mirror": "format=gray,hflip",
-    "noir": "eq=contrast=1.3:brightness=-0.05:saturation=0.3"
-}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # =========================
-# DOWNLOAD WITH FILTER
+# DOWNLOAD SINGLE VIDEO (STREAMED)
 # =========================
 
-@app.get("/download")
-def download_video(
-    url: str = Query(...),
-    n: int = Query(...),
-    filter: str = Query("none")
-):
+@app.post("/download")
+def download_video(data: VideoDownloadRequest):
     try:
-        if filter not in FILTERS:
-            raise HTTPException(400, "Invalid filter")
+        temp_dir = tempfile.mkdtemp()
 
-        tmp = tempfile.mkdtemp()
-        raw = os.path.join(tmp, "raw.mp4")
-        final = os.path.join(tmp, f"{n}.mp4")
-
-        # ---- yt-dlp download ----
         ydl_opts = {
-            "outtmpl": raw,
-            "format": "best",
+            "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+            "format": data.quality,
             "merge_output_format": "mp4",
             "quiet": True,
             "noplaylist": True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
+            info = ydl.extract_info(data.url, download=True)
+            filename = ydl.prepare_filename(info)
 
-        # ---- FFmpeg filter ----
-        if FILTERS[filter]:
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", raw,
-                "-vf", FILTERS[filter],
-                "-movflags", "faststart",
-                final
-            ]
-        else:
-            os.rename(raw, final)
-            cmd = None
+        if not os.path.exists(filename):
+            raise Exception("Download failed")
 
-        if cmd:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        if not os.path.exists(final):
-            raise Exception("Processing failed")
-
-        # ---- Stream to browser ----
         def stream():
-            with open(final, "rb") as f:
+            with open(filename, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     yield chunk
             try:
-                os.remove(final)
-                os.rmdir(tmp)
+                os.remove(filename)
+                os.rmdir(temp_dir)
             except:
                 pass
 
@@ -135,7 +98,7 @@ def download_video(
             stream(),
             media_type="video/mp4",
             headers={
-                "Content-Disposition": f'attachment; filename="{n}.mp4"'
+                "Content-Disposition": f'attachment; filename="{os.path.basename(filename)}"'
             }
         )
 
