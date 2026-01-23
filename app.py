@@ -1,26 +1,21 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 import yt_dlp
 import tempfile
 import os
+import re
 
 app = FastAPI()
 
-class ProfileRequest(BaseModel):
-    profile_url: str
-
-class DownloadRequest(BaseModel):
-    url: str
-    quality: str = "best"
-    mode: str = "original"  # original | bw
+def clean_name(text: str):
+    return re.sub(r"[^a-zA-Z0-9_]", "_", text)
 
 @app.get("/")
 def health():
-    return {"status": "backend running"}
+    return {"status": "ok"}
 
-@app.get("/profile/all")
-def profile_all(profile_url: str):
+@app.get("/profile")
+def get_profile(profile_url: str):
     try:
         ydl_opts = {
             "quiet": True,
@@ -31,26 +26,37 @@ def profile_all(profile_url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(profile_url, download=False)
 
-        videos = [
-            e["url"] for e in info.get("entries", [])
-            if e.get("url")
-        ]
+        username = clean_name(info.get("uploader", "tiktok_profile"))
 
-        return {"total": len(videos), "videos": videos}
+        videos = []
+        for i, e in enumerate(info.get("entries", []), start=1):
+            if e.get("url"):
+                videos.append({
+                    "index": i,
+                    "url": e["url"],
+                    "id": e.get("id"),
+                    "thumbnail": e.get("thumbnail")
+                })
+
+        return {
+            "profile": username,
+            "total": len(videos),
+            "videos": videos
+        }
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/download")
-def download(url: str, quality: str = "best", mode: str = "original"):
-    """
-    NOTE:
-    mode='bw' is accepted for UI compatibility,
-    but actual B&W processing is NOT applied (no ffmpeg).
-    """
-
+def download_video(
+    url: str,
+    index: int,
+    profile: str,
+    quality: str = "best"
+):
     tmp = tempfile.mkdtemp()
-    out = os.path.join(tmp, "%(id)s.%(ext)s")
+    filename = f"{profile}_{index:03d}.mp4"
+    out = os.path.join(tmp, filename)
 
     try:
         if quality == "720p":
@@ -69,28 +75,23 @@ def download(url: str, quality: str = "best", mode: str = "original"):
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            ydl.download([url])
 
         def stream():
-            with open(filename, "rb") as f:
+            with open(out, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     yield chunk
             try:
-                os.remove(filename)
+                os.remove(out)
                 os.rmdir(tmp)
             except:
                 pass
-
-        name = os.path.basename(filename)
-        if mode == "bw":
-            name = "BW_" + name  # label only, no transform
 
         return StreamingResponse(
             stream(),
             media_type="video/mp4",
             headers={
-                "Content-Disposition": f'attachment; filename="{name}"'
+                "Content-Disposition": f'attachment; filename="{filename}"'
             }
         )
 
