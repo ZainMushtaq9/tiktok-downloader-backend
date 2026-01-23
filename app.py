@@ -3,67 +3,41 @@ from fastapi.responses import StreamingResponse
 import yt_dlp
 import tempfile
 import os
+import time
+import zipfile
 import re
+from typing import List
 
 app = FastAPI()
 
-# -------------------------
-# HELPERS
-# -------------------------
-
-def clean_name(text: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_]", "_", text or "tiktok_profile")
-
-def select_format(quality: str) -> str:
-    if quality == "720p":
-        return "bestvideo[height<=720]+bestaudio/best"
-    if quality == "480p":
-        return "bestvideo[height<=480]+bestaudio/best"
-    return "best"
-
-# -------------------------
-# HEALTH
-# -------------------------
+def clean(text: str):
+    return re.sub(r"[^a-zA-Z0-9_]", "_", text)
 
 @app.get("/")
 def health():
-    return {"status": "backend running"}
-
-# -------------------------
-# PROFILE SCRAPER
-# -------------------------
+    return {"status": "ok"}
 
 @app.get("/profile")
-def get_profile(profile_url: str):
+def profile(profile_url: str):
     try:
         ydl_opts = {
             "quiet": True,
-            "skip_download": True,
-            "noplaylist": False
+            "extract_flat": True,
+            "skip_download": True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(profile_url, download=False)
 
-        entries = info.get("entries")
-        if not entries:
-            raise Exception("No videos found (TikTok may be rate limiting)")
-
-        profile = clean_name(info.get("uploader"))
+        username = clean(info.get("uploader", "tiktok_profile"))
 
         videos = []
-        index = 1
-        for e in entries:
-            if e and e.get("webpage_url"):
-                videos.append({
-                    "index": index,
-                    "url": e["webpage_url"],
-                    "thumbnail": e.get("thumbnail")
-                })
-                index += 1
+        for i, e in enumerate(info.get("entries", []), start=1):
+            if e.get("url"):
+                videos.append(e["url"])
 
         return {
-            "profile": profile,
+            "profile": username,
             "total": len(videos),
             "videos": videos
         }
@@ -71,54 +45,53 @@ def get_profile(profile_url: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# -------------------------
-# DOWNLOAD (STREAM)
-# -------------------------
-
-@app.get("/download")
-def download_video(
-    url: str,
-    index: int,
+@app.post("/download-all")
+def download_all(
     profile: str,
-    quality: str = "best"
+    urls: List[str],
+    quality: str = "best",
+    sleep_seconds: int = 3
 ):
-    tmp_dir = tempfile.mkdtemp()
-    filename = f"{clean_name(profile)}_{index:03d}.mp4"
-    output_path = os.path.join(tmp_dir, filename)
+    tmp = tempfile.mkdtemp()
+    zip_path = os.path.join(tmp, f"{profile}.zip")
 
     try:
-        ydl_opts = {
-            "outtmpl": output_path,
-            "format": select_format(quality),
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "noplaylist": True
-        }
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, url in enumerate(urls, start=1):
+                out = os.path.join(tmp, f"{idx}.mp4")
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+                ydl_opts = {
+                    "outtmpl": out,
+                    "format": quality,
+                    "merge_output_format": "mp4",
+                    "quiet": True,
+                    "noplaylist": True
+                }
 
-        if not os.path.exists(output_path):
-            raise Exception("Download failed")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+
+                if os.path.exists(out):
+                    zf.write(out, arcname=f"{idx}.mp4")
+                    os.remove(out)
+
+                time.sleep(sleep_seconds)  # ✅ anti-block
 
         def stream():
-            with open(output_path, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)
-                    if not chunk:
-                        break
+            with open(zip_path, "rb") as f:
+                while chunk := f.read(1024 * 1024):
                     yield chunk
             try:
-                os.remove(output_path)
-                os.rmdir(tmp_dir)
+                os.remove(zip_path)
+                os.rmdir(tmp)
             except:
                 pass
 
         return StreamingResponse(
             stream(),
-            media_type="video/mp4",
+            media_type="application/zip",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
+                "Content-Disposition": f'attachment; filename="{profile}.zip"'
             }
         )
 
