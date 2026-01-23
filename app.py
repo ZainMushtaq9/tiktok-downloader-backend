@@ -4,84 +4,102 @@ from pydantic import BaseModel
 import yt_dlp
 import tempfile
 import os
-import zipfile
-import io
-import shutil
-from typing import List
 
 app = FastAPI()
 
-# =========================
-# MODELS
-# =========================
 
-class ZipDownloadRequest(BaseModel):
-    urls: List[str]
+# ======================
+# MODELS
+# ======================
+
+class ProfileRequest(BaseModel):
+    profile_url: str
+
+class VideoRequest(BaseModel):
+    url: str
     quality: str = "best"
 
-# =========================
-# HELPERS
-# =========================
 
-def select_format(quality: str):
-    if quality == "720p":
-        return "bestvideo[height<=720]+bestaudio/best[height<=720]"
-    if quality == "480p":
-        return "bestvideo[height<=480]+bestaudio/best[height<=480]"
-    return "best"
-
-# =========================
+# ======================
 # HEALTH
-# =========================
+# ======================
 
 @app.get("/")
 def health():
-    return {"status": "backend running"}
+    return {"status": "ok"}
 
-# =========================
-# ZIP DOWNLOAD (ONE FILE)
-# =========================
 
-@app.post("/download/zip")
-def download_zip(data: ZipDownloadRequest):
-    temp_root = tempfile.mkdtemp()
-    zip_buffer = io.BytesIO()
+# ======================
+# FETCH ALL VIDEOS
+# ======================
 
+@app.post("/profile/all")
+def fetch_all_videos(data: ProfileRequest):
     try:
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for idx, url in enumerate(data.urls, start=1):
-                tmp_dir = tempfile.mkdtemp(dir=temp_root)
+        ydl_opts = {
+            "quiet": True,
+            "extract_flat": True,
+            "skip_download": True
+        }
 
-                ydl_opts = {
-                    "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
-                    "format": select_format(data.quality),
-                    "merge_output_format": "mp4",
-                    "quiet": True,
-                    "noplaylist": True,
-                }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(data.profile_url, download=False)
 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    file_path = ydl.prepare_filename(info)
+        videos = []
+        for e in info.get("entries", []):
+            if e.get("url"):
+                videos.append(e["url"])
 
-                if os.path.exists(file_path):
-                    zipf.write(
-                        file_path,
-                        arcname=f"{idx}.mp4"
-                    )
+        return {
+            "count": len(videos),
+            "videos": videos
+        }
 
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        zip_buffer.seek(0)
+
+# ======================
+# DOWNLOAD SINGLE VIDEO
+# ======================
+
+@app.post("/download")
+def download_video(data: VideoRequest):
+    try:
+        tmp = tempfile.mkdtemp()
+
+        ydl_opts = {
+            "outtmpl": f"{tmp}/%(id)s.%(ext)s",
+            "format": data.quality,
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "noplaylist": True
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(data.url, download=True)
+            file_path = ydl.prepare_filename(info)
+
+        if not os.path.exists(file_path):
+            raise Exception("Download failed")
+
+        def stream():
+            with open(file_path, "rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    yield chunk
+            try:
+                os.remove(file_path)
+                os.rmdir(tmp)
+            except Exception:
+                pass
 
         return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
+            stream(),
+            media_type="video/mp4",
             headers={
-                "Content-Disposition": 'attachment; filename="videos.zip"'
+                "Content-Disposition": f'attachment; filename="{os.path.basename(file_path)}"'
             }
         )
 
     except Exception as e:
-        shutil.rmtree(temp_root, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(e))
