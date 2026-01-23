@@ -7,50 +7,58 @@ import re
 
 app = FastAPI()
 
-# -------------------------
+# =========================
 # HELPERS
-# -------------------------
+# =========================
 
-def clean_name(text: str):
+def clean_name(text: str) -> str:
+    """Make filename safe"""
     return re.sub(r"[^a-zA-Z0-9_]", "_", text or "tiktok_profile")
 
-# -------------------------
+def select_format(quality: str) -> str:
+    if quality == "720p":
+        return "bestvideo[height<=720]+bestaudio/best"
+    if quality == "480p":
+        return "bestvideo[height<=480]+bestaudio/best"
+    return "best"
+
+# =========================
 # HEALTH
-# -------------------------
+# =========================
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {"status": "backend running"}
 
-# -------------------------
-# SCRAPE PROFILE (FIXED)
-# -------------------------
+# =========================
+# PROFILE SCRAPER (LIGHT)
+# =========================
 
 @app.get("/profile")
 def get_profile(profile_url: str):
     try:
         ydl_opts = {
             "quiet": True,
-            "skip_download": True,
-            "noplaylist": False
+            "extract_flat": True,
+            "skip_download": True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(profile_url, download=False)
 
-        entries = info.get("entries")
-        if not entries:
-            raise Exception("No videos found (TikTok may be blocking temporarily)")
-
-        profile = clean_name(info.get("uploader"))
+        profile = clean_name(
+            info.get("uploader")
+            or info.get("channel")
+            or "tiktok_profile"
+        )
 
         videos = []
-        for i, e in enumerate(entries, start=1):
-            if e and e.get("webpage_url"):
+        for i, entry in enumerate(info.get("entries", []), start=1):
+            if entry.get("url"):
                 videos.append({
                     "index": i,
-                    "url": e["webpage_url"],
-                    "thumbnail": e.get("thumbnail")
+                    "url": entry["url"],
+                    "thumbnail": entry.get("thumbnail")
                 })
 
         return {
@@ -62,9 +70,9 @@ def get_profile(profile_url: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# -------------------------
-# DOWNLOAD VIDEO
-# -------------------------
+# =========================
+# VIDEO DOWNLOAD (STREAM)
+# =========================
 
 @app.get("/download")
 def download_video(
@@ -73,21 +81,14 @@ def download_video(
     profile: str,
     quality: str = "best"
 ):
-    tmp = tempfile.mkdtemp()
+    tmp_dir = tempfile.mkdtemp()
     filename = f"{profile}_{index:03d}.mp4"
-    out = os.path.join(tmp, filename)
+    output_path = os.path.join(tmp_dir, filename)
 
     try:
-        if quality == "720p":
-            fmt = "bestvideo[height<=720]+bestaudio/best"
-        elif quality == "480p":
-            fmt = "bestvideo[height<=480]+bestaudio/best"
-        else:
-            fmt = "best"
-
         ydl_opts = {
-            "outtmpl": out,
-            "format": fmt,
+            "outtmpl": output_path,
+            "format": select_format(quality),
             "merge_output_format": "mp4",
             "quiet": True,
             "noplaylist": True
@@ -96,13 +97,21 @@ def download_video(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
+        if not os.path.exists(output_path):
+            raise Exception("Download failed")
+
         def stream():
-            with open(out, "rb") as f:
-                while chunk := f.read(1024 * 1024):
+            with open(output_path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)  # 1MB chunks
+                    if not chunk:
+                        break
                     yield chunk
+
+            # cleanup
             try:
-                os.remove(out)
-                os.rmdir(tmp)
+                os.remove(output_path)
+                os.rmdir(tmp_dir)
             except:
                 pass
 
