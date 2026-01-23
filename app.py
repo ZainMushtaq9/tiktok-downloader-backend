@@ -4,26 +4,16 @@ from pydantic import BaseModel
 import yt_dlp
 import tempfile
 import os
-from typing import List
 
 app = FastAPI()
-
-
-# =========================
-# MODELS
-# =========================
 
 class ProfileRequest(BaseModel):
     profile_url: str
 
-class VideoDownloadRequest(BaseModel):
+class VideoRequest(BaseModel):
     url: str
     quality: str = "best"
 
-
-# =========================
-# HEALTH
-# =========================
 
 @app.get("/")
 def health():
@@ -31,7 +21,7 @@ def health():
 
 
 # =========================
-# SCRAPE ALL VIDEOS FROM PROFILE
+# SCRAPE PROFILE
 # =========================
 
 @app.post("/profile/all")
@@ -46,53 +36,67 @@ def scrape_all_videos(data: ProfileRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(data.profile_url, download=False)
 
-        videos = []
-        for entry in info.get("entries", []):
-            if entry.get("url"):
-                videos.append(entry["url"])
+        videos = [e["url"] for e in info.get("entries", []) if e.get("url")]
 
-        return {
-            "total": len(videos),
-            "videos": videos
-        }
+        return {"total": len(videos), "videos": videos}
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 # =========================
-# DOWNLOAD SINGLE VIDEO (STREAMED)
+# PREVIEW (STREAMABLE URL)
+# =========================
+
+@app.post("/preview")
+def preview_video(data: VideoRequest):
+    try:
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(data.url, download=False)
+
+        # Best playable URL
+        video_url = info.get("url")
+
+        if not video_url:
+            raise Exception("No playable stream found")
+
+        return {"preview_url": video_url}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================
+# DOWNLOAD (STREAM FILE)
 # =========================
 
 @app.post("/download")
-def download_video(data: VideoDownloadRequest):
+def download_video(data: VideoRequest):
     try:
-        temp_dir = tempfile.mkdtemp()
+        tmp = tempfile.mkdtemp()
 
         ydl_opts = {
-            "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+            "outtmpl": f"{tmp}/%(id)s.%(ext)s",
             "format": data.quality,
             "merge_output_format": "mp4",
-            "quiet": True,
-            "noplaylist": True
+            "quiet": True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(data.url, download=True)
             filename = ydl.prepare_filename(info)
 
-        if not os.path.exists(filename):
-            raise Exception("Download failed")
-
         def stream():
             with open(filename, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     yield chunk
-            try:
-                os.remove(filename)
-                os.rmdir(temp_dir)
-            except:
-                pass
+            os.remove(filename)
+            os.rmdir(tmp)
 
         return StreamingResponse(
             stream(),
