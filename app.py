@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 import yt_dlp
 import tempfile
 import os
@@ -8,33 +7,13 @@ import subprocess
 
 app = FastAPI()
 
-# =========================
-# MODELS
-# =========================
-
-class ProfileRequest(BaseModel):
-    profile_url: str
-
-class DownloadRequest(BaseModel):
-    url: str
-    quality: str = "best"  # best | 720p | 480p
-
-
-# =========================
-# HEALTH
-# =========================
-
 @app.get("/")
 def health():
     return {"status": "backend running"}
 
 
-# =========================
-# SCRAPE PROFILE (ALL VIDEOS)
-# =========================
-
-@app.post("/profile/all")
-def scrape_profile(data: ProfileRequest):
+@app.get("/profile/all")
+def scrape_profile(profile_url: str):
     try:
         ydl_opts = {
             "quiet": True,
@@ -43,7 +22,7 @@ def scrape_profile(data: ProfileRequest):
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(data.profile_url, download=False)
+            info = ydl.extract_info(profile_url, download=False)
 
         videos = [
             entry["url"]
@@ -51,40 +30,25 @@ def scrape_profile(data: ProfileRequest):
             if entry.get("url")
         ]
 
-        return {
-            "total": len(videos),
-            "videos": videos
-        }
+        return {"total": len(videos), "videos": videos}
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# =========================
-# DOWNLOAD + AUTO BLACK & WHITE
-# =========================
-
-@app.post("/download")
-def download_video(data: DownloadRequest):
+@app.get("/download")
+def download_video(url: str, quality: str = "best"):
     tmp = tempfile.mkdtemp()
-
     raw = os.path.join(tmp, "raw.mp4")
     final = os.path.join(tmp, "final.mp4")
 
     try:
-        # -------------------------
-        # QUALITY
-        # -------------------------
-        if data.quality == "720p":
+        fmt = "best"
+        if quality == "720p":
             fmt = "bestvideo[height<=720]+bestaudio/best"
-        elif data.quality == "480p":
+        elif quality == "480p":
             fmt = "bestvideo[height<=480]+bestaudio/best"
-        else:
-            fmt = "best"
 
-        # -------------------------
-        # DOWNLOAD
-        # -------------------------
         ydl_opts = {
             "outtmpl": raw,
             "format": fmt,
@@ -93,34 +57,21 @@ def download_video(data: DownloadRequest):
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([data.url])
+            ydl.download([url])
 
         if not os.path.exists(raw):
             raise Exception("Download failed")
 
-        # -------------------------
-        # APPLY BLACK & WHITE
-        # -------------------------
+        # black & white (cheap filter)
         subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-i", raw,
-                "-vf", "format=gray",
-                "-c:a", "copy",
-                final
-            ],
+            ["ffmpeg", "-y", "-i", raw, "-vf", "format=gray", "-c:a", "copy", final],
             check=True
         )
 
-        # -------------------------
-        # STREAM
-        # -------------------------
         def stream():
             with open(final, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     yield chunk
-
-            # cleanup
             try:
                 os.remove(raw)
                 os.remove(final)
@@ -131,9 +82,7 @@ def download_video(data: DownloadRequest):
         return StreamingResponse(
             stream(),
             media_type="video/mp4",
-            headers={
-                "Content-Disposition": "attachment; filename=video_bw.mp4"
-            }
+            headers={"Content-Disposition": "attachment; filename=video.mp4"}
         )
 
     except Exception as e:
