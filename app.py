@@ -12,7 +12,7 @@ app = FastAPI()
 # =========================
 
 def clean_name(text: str) -> str:
-    """Make filename safe"""
+    """Make filenames safe"""
     return re.sub(r"[^a-zA-Z0-9_]", "_", text or "tiktok_profile")
 
 def select_format(quality: str) -> str:
@@ -31,20 +31,35 @@ def health():
     return {"status": "backend running"}
 
 # =========================
-# PROFILE SCRAPER (LIGHT)
+# PROFILE SCRAPER
 # =========================
 
 @app.get("/profile")
 def get_profile(profile_url: str):
+    """
+    Returns:
+    {
+      profile: "username",
+      total: 123,
+      videos: [
+        { index: 1, url: "...", thumbnail: "..." },
+        ...
+      ]
+    }
+    """
     try:
         ydl_opts = {
             "quiet": True,
-            "extract_flat": True,
-            "skip_download": True
+            "skip_download": True,
+            "noplaylist": False
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(profile_url, download=False)
+
+        entries = info.get("entries")
+        if not entries:
+            raise Exception("No videos found (TikTok may be rate-limiting)")
 
         profile = clean_name(
             info.get("uploader")
@@ -53,13 +68,15 @@ def get_profile(profile_url: str):
         )
 
         videos = []
-        for i, entry in enumerate(info.get("entries", []), start=1):
-            if entry.get("url"):
+        index = 1
+        for e in entries:
+            if e and e.get("webpage_url"):
                 videos.append({
-                    "index": i,
-                    "url": entry["url"],
-                    "thumbnail": entry.get("thumbnail")
+                    "index": index,
+                    "url": e["webpage_url"],
+                    "thumbnail": e.get("thumbnail")
                 })
+                index += 1
 
         return {
             "profile": profile,
@@ -71,7 +88,7 @@ def get_profile(profile_url: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 # =========================
-# VIDEO DOWNLOAD (STREAM)
+# DOWNLOAD SINGLE VIDEO
 # =========================
 
 @app.get("/download")
@@ -81,6 +98,11 @@ def download_video(
     profile: str,
     quality: str = "best"
 ):
+    """
+    Streams ONE video.
+    Browser handles saving.
+    Filename: profile_001.mp4
+    """
     tmp_dir = tempfile.mkdtemp()
     filename = f"{profile}_{index:03d}.mp4"
     output_path = os.path.join(tmp_dir, filename)
@@ -103,11 +125,10 @@ def download_video(
         def stream():
             with open(output_path, "rb") as f:
                 while True:
-                    chunk = f.read(1024 * 1024)  # 1MB chunks
+                    chunk = f.read(1024 * 1024)  # 1 MB
                     if not chunk:
                         break
                     yield chunk
-
             # cleanup
             try:
                 os.remove(output_path)
