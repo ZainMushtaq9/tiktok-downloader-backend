@@ -12,7 +12,6 @@ app = FastAPI()
 # =========================
 
 def clean_name(text: str) -> str:
-    """Make filenames safe"""
     return re.sub(r"[^a-zA-Z0-9_]", "_", text or "tiktok_profile")
 
 def select_format(quality: str) -> str:
@@ -31,21 +30,14 @@ def health():
     return {"status": "backend running"}
 
 # =========================
-# PROFILE SCRAPER
+# PROFILE SCRAPER (STABLE)
 # =========================
 
 @app.get("/profile")
 def get_profile(profile_url: str):
     """
-    Returns:
-    {
-      profile: "username",
-      total: 123,
-      videos: [
-        { index: 1, url: "...", thumbnail: "..." },
-        ...
-      ]
-    }
+    Scrape all video URLs from a TikTok profile.
+    Returns total count and a list with index, url, thumbnail.
     """
     try:
         ydl_opts = {
@@ -61,22 +53,18 @@ def get_profile(profile_url: str):
         if not entries:
             raise Exception("No videos found (TikTok may be rate-limiting)")
 
-        profile = clean_name(
-            info.get("uploader")
-            or info.get("channel")
-            or "tiktok_profile"
-        )
+        profile = clean_name(info.get("uploader"))
 
         videos = []
-        index = 1
+        idx = 1
         for e in entries:
             if e and e.get("webpage_url"):
                 videos.append({
-                    "index": index,
+                    "index": idx,
                     "url": e["webpage_url"],
                     "thumbnail": e.get("thumbnail")
                 })
-                index += 1
+                idx += 1
 
         return {
             "profile": profile,
@@ -88,7 +76,7 @@ def get_profile(profile_url: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 # =========================
-# DOWNLOAD SINGLE VIDEO
+# VIDEO DOWNLOAD (STREAM)
 # =========================
 
 @app.get("/download")
@@ -99,12 +87,11 @@ def download_video(
     quality: str = "best"
 ):
     """
-    Streams ONE video.
-    Browser handles saving.
-    Filename: profile_001.mp4
+    Download a single TikTok video and stream it to the browser.
+    File name format: profile_001.mp4
     """
     tmp_dir = tempfile.mkdtemp()
-    filename = f"{profile}_{index:03d}.mp4"
+    filename = f"{clean_name(profile)}_{index:03d}.mp4"
     output_path = os.path.join(tmp_dir, filename)
 
     try:
@@ -125,7 +112,7 @@ def download_video(
         def stream():
             with open(output_path, "rb") as f:
                 while True:
-                    chunk = f.read(1024 * 1024)  # 1 MB
+                    chunk = f.read(1024 * 1024)  # 1 MB chunks
                     if not chunk:
                         break
                     yield chunk
@@ -133,7 +120,7 @@ def download_video(
             try:
                 os.remove(output_path)
                 os.rmdir(tmp_dir)
-            except:
+            except Exception:
                 pass
 
         return StreamingResponse(
