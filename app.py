@@ -1,19 +1,26 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 import yt_dlp
 import tempfile
 import os
-import subprocess
 
 app = FastAPI()
+
+class ProfileRequest(BaseModel):
+    profile_url: str
+
+class DownloadRequest(BaseModel):
+    url: str
+    quality: str = "best"
+    mode: str = "original"  # original | bw
 
 @app.get("/")
 def health():
     return {"status": "backend running"}
 
-
 @app.get("/profile/all")
-def scrape_profile(profile_url: str):
+def profile_all(profile_url: str):
     try:
         ydl_opts = {
             "quiet": True,
@@ -25,9 +32,8 @@ def scrape_profile(profile_url: str):
             info = ydl.extract_info(profile_url, download=False)
 
         videos = [
-            entry["url"]
-            for entry in info.get("entries", [])
-            if entry.get("url")
+            e["url"] for e in info.get("entries", [])
+            if e.get("url")
         ]
 
         return {"total": len(videos), "videos": videos}
@@ -35,54 +41,57 @@ def scrape_profile(profile_url: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
 @app.get("/download")
-def download_video(url: str, quality: str = "best"):
+def download(url: str, quality: str = "best", mode: str = "original"):
+    """
+    NOTE:
+    mode='bw' is accepted for UI compatibility,
+    but actual B&W processing is NOT applied (no ffmpeg).
+    """
+
     tmp = tempfile.mkdtemp()
-    raw = os.path.join(tmp, "raw.mp4")
-    final = os.path.join(tmp, "final.mp4")
+    out = os.path.join(tmp, "%(id)s.%(ext)s")
 
     try:
-        fmt = "best"
         if quality == "720p":
             fmt = "bestvideo[height<=720]+bestaudio/best"
         elif quality == "480p":
             fmt = "bestvideo[height<=480]+bestaudio/best"
+        else:
+            fmt = "best"
 
         ydl_opts = {
-            "outtmpl": raw,
+            "outtmpl": out,
             "format": fmt,
             "merge_output_format": "mp4",
-            "quiet": True
+            "quiet": True,
+            "noplaylist": True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        if not os.path.exists(raw):
-            raise Exception("Download failed")
-
-        # black & white (cheap filter)
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", raw, "-vf", "format=gray", "-c:a", "copy", final],
-            check=True
-        )
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
 
         def stream():
-            with open(final, "rb") as f:
+            with open(filename, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     yield chunk
             try:
-                os.remove(raw)
-                os.remove(final)
+                os.remove(filename)
                 os.rmdir(tmp)
             except:
                 pass
 
+        name = os.path.basename(filename)
+        if mode == "bw":
+            name = "BW_" + name  # label only, no transform
+
         return StreamingResponse(
             stream(),
             media_type="video/mp4",
-            headers={"Content-Disposition": "attachment; filename=video.mp4"}
+            headers={
+                "Content-Disposition": f'attachment; filename="{name}"'
+            }
         )
 
     except Exception as e:
