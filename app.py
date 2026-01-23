@@ -4,7 +4,10 @@ from pydantic import BaseModel
 import yt_dlp
 import tempfile
 import os
+import zipfile
+import io
 import shutil
+from typing import List
 
 app = FastAPI()
 
@@ -12,12 +15,8 @@ app = FastAPI()
 # MODELS
 # =========================
 
-class ProfileRequest(BaseModel):
-    profile_url: str
-
-class DownloadRequest(BaseModel):
-    url: str
-    index: int
+class ZipDownloadRequest(BaseModel):
+    urls: List[str]
     quality: str = "best"
 
 # =========================
@@ -40,76 +39,49 @@ def health():
     return {"status": "backend running"}
 
 # =========================
-# FETCH ALL PROFILE VIDEOS
+# ZIP DOWNLOAD (ONE FILE)
 # =========================
 
-@app.post("/profile/all")
-def fetch_all_profile_videos(data: ProfileRequest):
-    try:
-        ydl_opts = {
-            "quiet": True,
-            "extract_flat": True,
-            "skip_download": True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(data.profile_url, download=False)
-
-        entries = info.get("entries", [])
-        videos = []
-
-        for e in entries:
-            if e.get("url"):
-                videos.append(e["url"])
-
-        return {
-            "total": len(videos),
-            "videos": videos
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# =========================
-# DOWNLOAD SINGLE VIDEO
-# =========================
-
-@app.post("/download")
-def download_video(data: DownloadRequest):
-    tmp_dir = tempfile.mkdtemp()
+@app.post("/download/zip")
+def download_zip(data: ZipDownloadRequest):
+    temp_root = tempfile.mkdtemp()
+    zip_buffer = io.BytesIO()
 
     try:
-        ydl_opts = {
-            "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
-            "format": select_format(data.quality),
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "noplaylist": True,
-        }
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for idx, url in enumerate(data.urls, start=1):
+                tmp_dir = tempfile.mkdtemp(dir=temp_root)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(data.url, download=True)
-            file_path = ydl.prepare_filename(info)
+                ydl_opts = {
+                    "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
+                    "format": select_format(data.quality),
+                    "merge_output_format": "mp4",
+                    "quiet": True,
+                    "noplaylist": True,
+                }
 
-        if not os.path.exists(file_path):
-            raise Exception("Download failed")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    file_path = ydl.prepare_filename(info)
 
-        output_name = f"{data.index}.mp4"
+                if os.path.exists(file_path):
+                    zipf.write(
+                        file_path,
+                        arcname=f"{idx}.mp4"
+                    )
 
-        def stream():
-            with open(file_path, "rb") as f:
-                while chunk := f.read(1024 * 1024):
-                    yield chunk
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        zip_buffer.seek(0)
 
         return StreamingResponse(
-            stream(),
-            media_type="video/mp4",
+            zip_buffer,
+            media_type="application/zip",
             headers={
-                "Content-Disposition": f'attachment; filename="{output_name}"'
+                "Content-Disposition": 'attachment; filename="videos.zip"'
             }
         )
 
     except Exception as e:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(temp_root, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(e))
