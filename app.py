@@ -5,76 +5,66 @@ from typing import List
 import yt_dlp
 import tempfile
 import os
-import time
 import zipfile
 import io
 import shutil
 
-app = FastAPI(
-    title="TikTok Downloader API",
-    version="1.0.0"
-)
+app = FastAPI(title="TikTok Downloader API")
 
-# =====================================================
+# =========================
 # MODELS
-# =====================================================
+# =========================
 
 class VideoRequest(BaseModel):
     url: str
-    quality: str = "best"   # best | 720p | 480p
+    quality: str = "best"
 
-class ProfileRequest(BaseModel):
+class ProfileChunkRequest(BaseModel):
     profile_url: str
-    sleep_seconds: int = 2  # anti-block delay
+    offset: int = 0
+    limit: int = 20
 
 class ZipRequest(BaseModel):
     urls: List[str]
     quality: str = "best"
 
-# =====================================================
+# =========================
 # HELPERS
-# =====================================================
+# =========================
 
-def select_format(quality: str) -> str:
-    if quality == "720p":
-        return "bestvideo[height<=720]+bestaudio/best[height<=720]"
-    if quality == "480p":
-        return "bestvideo[height<=480]+bestaudio/best[height<=480]"
+def select_format(q: str):
+    if q == "720p":
+        return "bestvideo[height<=720]+bestaudio/best"
+    if q == "480p":
+        return "bestvideo[height<=480]+bestaudio/best"
     return "best"
 
-def safe_cleanup(path: str):
+def safe_rm(path):
     try:
-        if os.path.exists(path):
-            shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
 
-# =====================================================
-# HEALTH CHECK
-# =====================================================
+# =========================
+# HEALTH
+# =========================
 
 @app.get("/")
 def health():
-    return {
-        "status": "backend running",
-        "service": "tiktok-downloader",
-        "version": "1.0.0"
-    }
+    return {"status": "ok"}
 
-# =====================================================
-# SINGLE VIDEO DOWNLOAD (STREAMED)
-# =====================================================
+# =========================
+# SINGLE VIDEO
+# =========================
 
 @app.post("/video")
 def download_video(data: VideoRequest):
-    temp_dir = tempfile.mkdtemp()
-
+    tmp = tempfile.mkdtemp()
     try:
         ydl_opts = {
-            "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+            "outtmpl": f"{tmp}/%(id)s.%(ext)s",
             "format": select_format(data.quality),
             "merge_output_format": "mp4",
-            "noplaylist": True,
             "quiet": True
         }
 
@@ -82,20 +72,14 @@ def download_video(data: VideoRequest):
             info = ydl.extract_info(data.url, download=True)
             filename = ydl.prepare_filename(info)
 
-        if not os.path.exists(filename):
-            raise Exception("Video download failed")
-
-        def stream_file():
+        def stream():
             with open(filename, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)  # 1MB chunks
-                    if not chunk:
-                        break
+                while chunk := f.read(1024 * 1024):
                     yield chunk
-            safe_cleanup(temp_dir)
+            safe_rm(tmp)
 
         return StreamingResponse(
-            stream_file(),
+            stream(),
             media_type="video/mp4",
             headers={
                 "Content-Disposition": f'attachment; filename="{os.path.basename(filename)}"'
@@ -103,103 +87,82 @@ def download_video(data: VideoRequest):
         )
 
     except Exception as e:
-        safe_cleanup(temp_dir)
-        raise HTTPException(status_code=400, detail=str(e))
+        safe_rm(tmp)
+        raise HTTPException(400, str(e))
 
-# =====================================================
-# PROFILE — SCRAPE ALL VIDEOS (NO PAGINATION)
-# =====================================================
+# =========================
+# PROFILE (CHUNKED SCRAPE)
+# =========================
 
-@app.post("/profile/all")
-def scrape_all_profile_videos(data: ProfileRequest):
-    """
-    Returns ALL video URLs from a TikTok profile.
-    No UI limits. No pagination. Frontend decides how to render.
-    """
-
+@app.post("/profile/chunk")
+def scrape_profile_chunk(data: ProfileChunkRequest):
     try:
         ydl_opts = {
             "quiet": True,
             "extract_flat": True,
-            "skip_download": True
+            "skip_download": True,
+            "playliststart": data.offset + 1,
+            "playlistend": data.offset + data.limit
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(data.profile_url, download=False)
 
         entries = info.get("entries", [])
-        videos = []
-
-        for entry in entries:
-            if entry.get("url"):
-                videos.append(entry["url"])
-                if data.sleep_seconds > 0:
-                    time.sleep(data.sleep_seconds)
+        urls = [e["url"] for e in entries if e.get("url")]
 
         return {
-            "profile_url": data.profile_url,
-            "total_videos": len(videos),
-            "videos": videos
+            "offset": data.offset + len(urls),
+            "count": len(urls),
+            "videos": urls
         }
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(400, str(e))
 
-# =====================================================
-# BULK ZIP DOWNLOAD (STREAMED)
-# =====================================================
+# =========================
+# ZIP DOWNLOAD
+# =========================
 
 @app.post("/zip")
 def zip_download(data: ZipRequest):
-    """
-    Downloads multiple TikTok videos and returns a ZIP file.
-    """
-
-    temp_root = tempfile.mkdtemp()
-    zip_buffer = io.BytesIO()
+    tmp_root = tempfile.mkdtemp()
+    zip_buf = io.BytesIO()
 
     try:
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for idx, url in enumerate(data.urls, start=1):
-                temp_dir = tempfile.mkdtemp(dir=temp_root)
-
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for i, url in enumerate(data.urls, 1):
+                tmp = tempfile.mkdtemp(dir=tmp_root)
                 ydl_opts = {
-                    "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+                    "outtmpl": f"{tmp}/%(id)s.%(ext)s",
                     "format": select_format(data.quality),
                     "merge_output_format": "mp4",
-                    "noplaylist": True,
                     "quiet": True
                 }
 
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=True)
-                        filename = ydl.prepare_filename(info)
+                        file = ydl.prepare_filename(info)
 
-                    if os.path.exists(filename):
-                        zf.write(
-                            filename,
-                            arcname=f"{idx}_{os.path.basename(filename)}"
-                        )
+                    if os.path.exists(file):
+                        zf.write(file, arcname=f"{i}_{os.path.basename(file)}")
 
                 except Exception:
-                    pass  # skip failed videos
+                    pass
 
                 finally:
-                    safe_cleanup(temp_dir)
+                    safe_rm(tmp)
 
-        zip_buffer.seek(0)
-
+        zip_buf.seek(0)
         return StreamingResponse(
-            zip_buffer,
+            zip_buf,
             media_type="application/zip",
-            headers={
-                "Content-Disposition": "attachment; filename=tiktok_videos.zip"
-            }
+            headers={"Content-Disposition": "attachment; filename=videos.zip"}
         )
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(400, str(e))
 
     finally:
-        safe_cleanup(temp_root)
+        safe_rm(tmp_root)
