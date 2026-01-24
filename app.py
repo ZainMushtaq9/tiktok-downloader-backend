@@ -91,10 +91,68 @@ def extract_info(url: str):
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+# =========================
+# INSTAGRAM SINGLE VIDEO DOWNLOAD
+# =========================
 
+@app.get("/instagram/download")
+def instagram_download(
+    url: str,
+    quality: str = "best"
+):
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Invalid Instagram URL")
+
+    tmp_dir = tempfile.mkdtemp()
+    filename = "instagram_video.mp4"
+    filepath = os.path.join(tmp_dir, filename)
+
+    try:
+        ydl_opts = {
+            "outtmpl": filepath,
+            "format": quality,
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "noplaylist": True,
+            "nocheckcertificate": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        if not os.path.exists(filepath):
+            raise Exception("Instagram download failed")
+
+        def stream():
+            with open(filepath, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            try:
+                os.remove(filepath)
+                os.rmdir(tmp_dir)
+            except:
+                pass
+
+        return StreamingResponse(
+            stream(),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": 'attachment; filename="instagram_video.mp4"'
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail="This Instagram video cannot be downloaded. Only public videos are supported."
+        )
 # ======================================================
 # UNIVERSAL DOWNLOAD ENDPOINT
 # ======================================================
+
 @app.get("/download")
 def download(
     url: str,
