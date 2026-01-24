@@ -210,3 +210,128 @@ def instagram_download(
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+
+
+
+# =========================
+# FACEBOOK SINGLE VIDEO DOWNLOAD
+# =========================
+
+@app.get("/facebook/download")
+def facebook_download(
+    url: str,
+    quality: str = "best"
+):
+    tmp_dir = tempfile.mkdtemp()
+    filename = "facebook_video.mp4"
+    filepath = os.path.join(tmp_dir, filename)
+
+    try:
+        if not url.startswith("http"):
+            raise HTTPException(status_code=400, detail="Invalid Facebook URL")
+
+        ydl_opts = {
+            "outtmpl": filepath,
+            "format": quality,
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "noplaylist": True,
+            "nocheckcertificate": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        if not os.path.exists(filepath):
+            raise Exception("Facebook video download failed")
+
+        def stream():
+            with open(filepath, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            try:
+                os.remove(filepath)
+                os.rmdir(tmp_dir)
+            except:
+                pass
+
+        return StreamingResponse(
+            stream(),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": 'attachment; filename="facebook_video.mp4"'
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+
+
+# =========================
+# LIKEE SINGLE VIDEO DOWNLOAD
+# =========================
+
+@app.get("/likee/download")
+def likee_download(
+    url: str,
+    quality: str = "best"
+):
+    tmp_dir = tempfile.mkdtemp()
+    filename = "likee_video.mp4"
+    filepath = os.path.join(tmp_dir, filename)
+
+    try:
+        if not url.startswith("http"):
+            raise HTTPException(status_code=400, detail="Invalid Likee URL")
+
+        ydl_opts = {
+            "outtmpl": filepath,
+            "format": quality,
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "noplaylist": True,
+            "nocheckcertificate": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        if not os.path.exists(filepath):
+            raise Exception("Likee video download failed")
+
+        def stream():
+            with open(filepath, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            try:
+                os.remove(filepath)
+                os.rmdir(tmp_dir)
+            except:
+                pass
+
+        return StreamingResponse(
+            stream(),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": 'attachment; filename="likee_video.mp4"'
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+
+
+            
+
