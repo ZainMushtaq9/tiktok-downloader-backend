@@ -1,17 +1,17 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import yt_dlp
 import tempfile
 import os
 import re
+from typing import Optional
 
-app = FastAPI(title="Universal Downloader API")
+app = FastAPI(title="Multi Platform Downloader API")
 
-# ======================================================
-# CORS (GitHub Pages / Static Frontend)
-# ======================================================
-
+# =========================
+# CORS (GitHub Pages SAFE)
+# =========================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,90 +19,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ======================================================
+# =========================
 # HELPERS
-# ======================================================
+# =========================
 
-def clean_name(text: str):
-    return re.sub(r"[^a-zA-Z0-9_]", "_", text or "video")
+def clean(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]", "_", text)
 
-def select_format(quality: str):
-    if quality == "720p":
-        return "bestvideo[height<=720]+bestaudio/best"
-    if quality == "480p":
-        return "bestvideo[height<=480]+bestaudio/best"
-    return "best"
+def ydl_base_opts():
+    return {
+        "quiet": True,
+        "nocheckcertificate": True,
+        "noplaylist": True,
+    }
 
-# ======================================================
-# HEALTH CHECK
-# ======================================================
+# =========================
+# HEALTH
+# =========================
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "downloader-backend"}
 
 # ======================================================
-# YOUTUBE INFO (SINGLE / PLAYLIST DETECTION)
+# UNIVERSAL INFO ENDPOINT (VIDEO OR PLAYLIST)
 # ======================================================
-
-@app.get("/youtube/info")
-def youtube_info(url: str):
+@app.get("/info")
+def extract_info(url: str):
     try:
-        ydl_opts = {
+        if not url.startswith("http"):
+            raise HTTPException(status_code=400, detail="Invalid URL")
+
+        opts = {
             "quiet": True,
+            "extract_flat": "in_playlist",
             "skip_download": True,
-            "extract_flat": True,
+            "nocheckcertificate": True,
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        # Playlist
-        if info.get("_type") == "playlist":
+        # SINGLE VIDEO
+        if "entries" not in info:
             return {
-                "type": "playlist",
+                "type": "single",
                 "title": info.get("title"),
-                "total": len(info.get("entries", []))
+                "thumbnail": info.get("thumbnail"),
+                "url": info.get("webpage_url"),
             }
 
-        # Single video
-        return {
-            "type": "single",
-            "title": info.get("title"),
-            "thumbnail": info.get("thumbnail")
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# ======================================================
-# YOUTUBE PLAYLIST VIDEOS (LINK EXPORT ONLY)
-# ======================================================
-
-@app.get("/youtube/playlist")
-def youtube_playlist(url: str):
-    try:
-        ydl_opts = {
-            "quiet": True,
-            "skip_download": True,
-            "extract_flat": True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
+        # PLAYLIST
         videos = []
-        for i, e in enumerate(info.get("entries", []), start=1):
-            if e.get("url"):
-                videos.append({
-                    "index": i,
-                    "url": e["url"],
-                    "title": e.get("title"),
-                    "thumbnail": e.get("thumbnail")
-                })
+        for i, entry in enumerate(info["entries"], start=1):
+            if not entry:
+                continue
+
+            videos.append({
+                "index": i,
+                "title": entry.get("title"),
+                "url": entry.get("url") or entry.get("webpage_url"),
+                "thumbnail": entry.get("thumbnail"),
+            })
 
         return {
-            "playlist": info.get("title"),
+            "type": "playlist",
+            "title": info.get("title"),
+            "total": len(videos),
             "videos": videos
         }
 
@@ -111,45 +94,44 @@ def youtube_playlist(url: str):
 
 # ======================================================
 # UNIVERSAL DOWNLOAD ENDPOINT
-# (TikTok, YouTube, Instagram, Facebook, Likee)
 # ======================================================
-
 @app.get("/download")
-def download_video(
+def download(
     url: str,
-    index: int = 1,
-    profile: str = "video",
-    quality: str = "best"
+    filename: Optional[str] = "video",
+    quality: Optional[str] = "best"
 ):
     tmp_dir = tempfile.mkdtemp()
-    filename = f"{clean_name(profile)}_{index:03d}.mp4"
-    filepath = os.path.join(tmp_dir, filename)
+    safe_name = clean(filename)
+    output = os.path.join(tmp_dir, f"{safe_name}.mp4")
 
     try:
-        ydl_opts = {
-            "outtmpl": filepath,
-            "format": select_format(quality),
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "noplaylist": True,
-            "nocheckcertificate": True,
-        }
+        if quality == "720p":
+            fmt = "bestvideo[height<=720]+bestaudio/best"
+        elif quality == "480p":
+            fmt = "bestvideo[height<=480]+bestaudio/best"
+        else:
+            fmt = "best"
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        opts = ydl_base_opts()
+        opts.update({
+            "format": fmt,
+            "outtmpl": output,
+            "merge_output_format": "mp4",
+        })
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        if not os.path.exists(filepath):
+        if not os.path.exists(output):
             raise Exception("Download failed")
 
         def stream():
-            with open(filepath, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)
-                    if not chunk:
-                        break
+            with open(output, "rb") as f:
+                while chunk := f.read(1024 * 1024):
                     yield chunk
             try:
-                os.remove(filepath)
+                os.remove(output)
                 os.rmdir(tmp_dir)
             except:
                 pass
@@ -158,7 +140,7 @@ def download_video(
             stream(),
             media_type="video/mp4",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
+                "Content-Disposition": f'attachment; filename="{safe_name}.mp4"'
             }
         )
 
