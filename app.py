@@ -9,9 +9,9 @@ import re
 
 app = FastAPI()
 
-# =========================
-# CORS (GitHub Pages / Static Frontend)
-# =========================
+# ======================================================
+# CORS (Required for GitHub Pages / Static Frontend)
+# ======================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,11 +19,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
+# ======================================================
 # HELPERS
-# =========================
+# ======================================================
 
-def clean_name(text: str):
+def clean_name(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", text or "")
 
 def detect_platform(url: str) -> str:
@@ -35,36 +35,45 @@ def detect_platform(url: str) -> str:
         return "youtube"
     if "instagram.com" in domain:
         return "instagram"
-    if "twitter.com" in domain or "x.com" in domain:
-        return "twitter"
     if "facebook.com" in domain or "fb.watch" in domain:
         return "facebook"
+    if "twitter.com" in domain or "x.com" in domain:
+        return "twitter"
     if "likee.video" in domain:
         return "likee"
 
     return "unknown"
 
-def get_format(quality: str):
+def get_format(quality: str) -> str:
     if quality == "720p":
         return "bestvideo[height<=720]+bestaudio/best"
     if quality == "480p":
         return "bestvideo[height<=480]+bestaudio/best"
     return "best"
 
-# =========================
-# HEALTH
-# =========================
+# ======================================================
+# HEALTH CHECK
+# ======================================================
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "service": "universal-video-downloader",
+        "engine": "yt-dlp"
+    }
 
-# =========================
-# INFO (PREVIEW ONLY – ALL PLATFORMS)
-# =========================
+# ======================================================
+# INFO / PREVIEW (ALL PLATFORMS)
+# ======================================================
 
 @app.get("/info")
 def video_info(url: str):
+    """
+    Preview-only endpoint.
+    No download.
+    Safe for AdSense.
+    """
     try:
         if not url.startswith("http"):
             raise HTTPException(status_code=400, detail="Invalid URL")
@@ -90,69 +99,17 @@ def video_info(url: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# =========================
-# TIKTOK PROFILE (KEEP – WORKING)
-# =========================
-
-@app.get("/profile")
-def tiktok_profile(profile_url: str):
-    try:
-        if not profile_url.startswith("http"):
-            raise HTTPException(status_code=400, detail="Invalid profile URL")
-
-        ydl_opts = {
-            "quiet": True,
-            "extract_flat": "in_playlist",
-            "skip_download": True,
-            "forcejson": True,
-            "nocheckcertificate": True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(profile_url, download=False)
-
-        username = clean_name(
-            info.get("uploader")
-            or info.get("channel")
-            or "tiktok_profile"
-        )
-
-        videos = []
-        for i, e in enumerate(info.get("entries", []), start=1):
-            if not e:
-                continue
-
-            vid = e.get("id") or e.get("url")
-            if not vid:
-                continue
-
-            url = (
-                vid if vid.startswith("http")
-                else f"https://www.tiktok.com/@{username}/video/{vid}"
-            )
-
-            videos.append({
-                "index": i,
-                "url": url,
-                "thumbnail": e.get("thumbnail")
-            })
-
-        return {
-            "platform": "tiktok",
-            "profile": username,
-            "total": len(videos),
-            "videos": videos
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# =========================
-# YOUTUBE INFO (SINGLE OR PLAYLIST)
-# =========================
+# ======================================================
+# YOUTUBE INFO (DETECT SINGLE VS PLAYLIST)
+# ======================================================
 
 @app.get("/youtube/info")
 def youtube_info(url: str):
+    """
+    Detects whether the URL is:
+    - Single YouTube video
+    - YouTube playlist
+    """
     try:
         if not url.startswith("http"):
             raise HTTPException(status_code=400, detail="Invalid URL")
@@ -187,12 +144,17 @@ def youtube_info(url: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# =========================
-# YOUTUBE PLAYLIST (URL LIST ONLY)
-# =========================
+# ======================================================
+# YOUTUBE PLAYLIST (EXPORT VIDEO LINKS ONLY)
+# ======================================================
 
 @app.get("/youtube/playlist")
 def youtube_playlist(url: str):
+    """
+    Extracts ALL video URLs from a playlist.
+    Does NOT download.
+    Frontend controls queue + delay.
+    """
     try:
         if not url.startswith("http"):
             raise HTTPException(status_code=400, detail="Invalid playlist URL")
@@ -240,9 +202,9 @@ def youtube_playlist(url: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# =========================
+# ======================================================
 # UNIVERSAL DOWNLOAD (ALL PLATFORMS)
-# =========================
+# ======================================================
 
 @app.get("/download")
 def download_video(
@@ -251,6 +213,15 @@ def download_video(
     profile: str,
     quality: str = "best"
 ):
+    """
+    Downloads ONE video per request.
+    Used for:
+    - TikTok
+    - YouTube (single + playlist queue)
+    - Instagram
+    - Facebook
+    - Likee
+    """
     tmp_dir = tempfile.mkdtemp()
     filename = f"{clean_name(profile)}_{index:03d}.mp4"
     filepath = os.path.join(tmp_dir, filename)
