@@ -1,16 +1,15 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import yt_dlp
 import tempfile
 import os
 import re
-from typing import List
 
-app = FastAPI(title="Multi Platform Downloader API")
+app = FastAPI(title="Video Downloader API", version="1.0")
 
 # ======================================================
-# CORS (GitHub Pages SAFE)
+# CORS (GitHub Pages / Browser Safe)
 # ======================================================
 app.add_middleware(
     CORSMiddleware,
@@ -23,10 +22,10 @@ app.add_middleware(
 # HELPERS
 # ======================================================
 
-def clean(text: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_]", "_", text)
+def clean_filename(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_\\-]", "_", text)
 
-def stream_file(path: str, tmp_dir: str):
+def stream_and_cleanup(path: str, tmp_dir: str):
     with open(path, "rb") as f:
         while chunk := f.read(1024 * 1024):
             yield chunk
@@ -36,11 +35,12 @@ def stream_file(path: str, tmp_dir: str):
     except:
         pass
 
-def base_ydl_opts():
+def base_ydl():
     return {
         "quiet": True,
         "nocheckcertificate": True,
         "noplaylist": True,
+        "merge_output_format": "mp4",
     }
 
 # ======================================================
@@ -56,7 +56,7 @@ def health():
 # ======================================================
 
 @app.get("/tiktok/profile")
-def tiktok_profile(profile_url: str):
+def tiktok_profile(profile_url: str = Query(...)):
     if "tiktok.com" not in profile_url:
         raise HTTPException(400, "Invalid TikTok profile URL")
 
@@ -72,33 +72,31 @@ def tiktok_profile(profile_url: str):
 
     videos = []
     for i, e in enumerate(info.get("entries", []), start=1):
-        if not e:
+        if not e or not e.get("url"):
             continue
         videos.append({
             "index": i,
-            "url": e.get("url"),
+            "url": e["url"],
             "thumbnail": e.get("thumbnail")
         })
 
     return {
-        "profile": clean(info.get("uploader", "tiktok_profile")),
+        "type": "profile",
+        "platform": "tiktok",
         "total": len(videos),
         "videos": videos
     }
 
-@app.get("/tiktok/download")
-def tiktok_download(url: str):
+@app.get("/tiktok/single")
+def tiktok_single(url: str = Query(...)):
     if "tiktok.com" not in url:
         raise HTTPException(400, "Invalid TikTok video URL")
 
     tmp = tempfile.mkdtemp()
     path = os.path.join(tmp, "tiktok.mp4")
 
-    opts = base_ydl_opts()
-    opts.update({
-        "outtmpl": path,
-        "merge_output_format": "mp4",
-    })
+    opts = base_ydl()
+    opts["outtmpl"] = path
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
@@ -107,17 +105,17 @@ def tiktok_download(url: str):
         raise HTTPException(400, "TikTok download failed")
 
     return StreamingResponse(
-        stream_file(path, tmp),
+        stream_and_cleanup(path, tmp),
         media_type="video/mp4",
         headers={"Content-Disposition": 'attachment; filename="tiktok.mp4"'}
     )
 
 # ======================================================
-# YOUTUBE (NOVELTY FEATURE)
+# YOUTUBE
 # ======================================================
 
 @app.get("/youtube/info")
-def youtube_info(url: str):
+def youtube_info(url: str = Query(...)):
     if "youtube.com" not in url and "youtu.be" not in url:
         raise HTTPException(400, "Invalid YouTube URL")
 
@@ -131,46 +129,45 @@ def youtube_info(url: str):
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    # SINGLE VIDEO
     if "entries" not in info:
         return {
             "type": "single",
+            "platform": "youtube",
             "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
-            "url": info.get("webpage_url")
+            "url": info.get("webpage_url"),
+            "thumbnail": info.get("thumbnail")
         }
 
-    # PLAYLIST
     videos = []
     for i, e in enumerate(info["entries"], start=1):
-        if not e:
+        if not e or not e.get("url"):
             continue
         videos.append({
             "index": i,
             "title": e.get("title"),
-            "url": e.get("url")
+            "url": e["url"]
         })
 
     return {
         "type": "playlist",
+        "platform": "youtube",
         "title": info.get("title"),
         "total": len(videos),
         "videos": videos
     }
 
-@app.get("/youtube/download")
-def youtube_download(url: str):
+@app.get("/youtube/single")
+def youtube_single(url: str = Query(...)):
     if "youtube.com" not in url and "youtu.be" not in url:
         raise HTTPException(400, "Invalid YouTube video URL")
 
     tmp = tempfile.mkdtemp()
     path = os.path.join(tmp, "youtube.mp4")
 
-    opts = base_ydl_opts()
+    opts = base_ydl()
     opts.update({
         "format": "best",
         "outtmpl": path,
-        "merge_output_format": "mp4",
     })
 
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -180,25 +177,25 @@ def youtube_download(url: str):
         raise HTTPException(400, "YouTube download failed")
 
     return StreamingResponse(
-        stream_file(path, tmp),
+        stream_and_cleanup(path, tmp),
         media_type="video/mp4",
         headers={"Content-Disposition": 'attachment; filename="youtube.mp4"'}
     )
 
 # ======================================================
-# INSTAGRAM
+# INSTAGRAM (SINGLE ONLY)
 # ======================================================
 
-@app.get("/instagram/download")
-def instagram_download(url: str):
+@app.get("/instagram/single")
+def instagram_single(url: str = Query(...)):
     if "instagram.com" not in url:
         raise HTTPException(400, "Invalid Instagram URL")
 
     tmp = tempfile.mkdtemp()
     path = os.path.join(tmp, "instagram.mp4")
 
-    opts = base_ydl_opts()
-    opts.update({"outtmpl": path})
+    opts = base_ydl()
+    opts["outtmpl"] = path
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
@@ -207,25 +204,25 @@ def instagram_download(url: str):
         raise HTTPException(400, "Instagram download failed")
 
     return StreamingResponse(
-        stream_file(path, tmp),
+        stream_and_cleanup(path, tmp),
         media_type="video/mp4",
         headers={"Content-Disposition": 'attachment; filename="instagram.mp4"'}
     )
 
 # ======================================================
-# FACEBOOK
+# FACEBOOK (SINGLE ONLY)
 # ======================================================
 
-@app.get("/facebook/download")
-def facebook_download(url: str):
+@app.get("/facebook/single")
+def facebook_single(url: str = Query(...)):
     if "facebook.com" not in url:
         raise HTTPException(400, "Invalid Facebook URL")
 
     tmp = tempfile.mkdtemp()
     path = os.path.join(tmp, "facebook.mp4")
 
-    opts = base_ydl_opts()
-    opts.update({"outtmpl": path})
+    opts = base_ydl()
+    opts["outtmpl"] = path
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
@@ -234,25 +231,25 @@ def facebook_download(url: str):
         raise HTTPException(400, "Facebook download failed")
 
     return StreamingResponse(
-        stream_file(path, tmp),
+        stream_and_cleanup(path, tmp),
         media_type="video/mp4",
         headers={"Content-Disposition": 'attachment; filename="facebook.mp4"'}
     )
 
 # ======================================================
-# LIKEE
+# LIKEE (SINGLE ONLY)
 # ======================================================
 
-@app.get("/likee/download")
-def likee_download(url: str):
-    if "likee.video" not in url:
+@app.get("/likee/single")
+def likee_single(url: str = Query(...)):
+    if "likee" not in url:
         raise HTTPException(400, "Invalid Likee URL")
 
     tmp = tempfile.mkdtemp()
     path = os.path.join(tmp, "likee.mp4")
 
-    opts = base_ydl_opts()
-    opts.update({"outtmpl": path})
+    opts = base_ydl()
+    opts["outtmpl"] = path
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
@@ -261,7 +258,7 @@ def likee_download(url: str):
         raise HTTPException(400, "Likee download failed")
 
     return StreamingResponse(
-        stream_file(path, tmp),
+        stream_and_cleanup(path, tmp),
         media_type="video/mp4",
         headers={"Content-Disposition": 'attachment; filename="likee.mp4"'}
     )
