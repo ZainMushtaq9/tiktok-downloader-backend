@@ -6,13 +6,10 @@ import tempfile
 import os
 import re
 
-app = FastAPI(
-    title="Universal Video Downloader API",
-    version="1.1"
-)
+app = FastAPI(title="Universal Video Downloader API", version="2.0")
 
 # ======================================================
-# CORS (Browser + GitHub Pages safe)
+# CORS
 # ======================================================
 app.add_middleware(
     CORSMiddleware,
@@ -24,9 +21,8 @@ app.add_middleware(
 # ======================================================
 # HELPERS
 # ======================================================
-
 def clean_name(text: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_]", "_", text or "video")
+    return re.sub(r"[^a-zA-Z0-9_]", "_", text)
 
 def stream_and_cleanup(path: str, tmp_dir: str):
     with open(path, "rb") as f:
@@ -38,39 +34,24 @@ def stream_and_cleanup(path: str, tmp_dir: str):
     except:
         pass
 
-def base_ydl():
-    return {
-        "quiet": True,
-        "nocheckcertificate": True,
-        "noplaylist": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0"
-        }
-    }
-
 # ======================================================
-# HEALTH CHECK
+# HEALTH
 # ======================================================
-
 @app.get("/")
 def health():
-    return {
-        "status": "ok",
-        "service": "universal-downloader"
-    }
+    return {"status": "ok", "service": "downloader-core"}
 
 # ======================================================
-# PREVIEW (SINGLE VIDEO DETAILS)
+# PREVIEW (SINGLE VIDEO)
 # ======================================================
-
 @app.get("/preview")
 def preview(url: str = Query(...)):
     """
-    Fetch metadata for a public video.
-    Used for thumbnail + title + duration preview.
+    Extract metadata for a single public video.
+    Guaranteed title + thumbnail fallback.
     """
 
-    opts = {
+    ydl_opts = {
         "quiet": True,
         "skip_download": True,
         "nocheckcertificate": True,
@@ -80,68 +61,73 @@ def preview(url: str = Query(...)):
     }
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception:
-        raise HTTPException(400, "Unable to fetch preview information")
+        raise HTTPException(400, "Unable to fetch preview data")
 
     return {
-        "title": info.get("title"),
-        "uploader": info.get("uploader"),
-        "duration": info.get("duration"),
+        "title": info.get("title") or "Public Video",
+        "uploader": info.get("uploader") or "Unknown",
         "thumbnail": info.get("thumbnail"),
-        "webpage_url": info.get("webpage_url"),
-        "platform": info.get("extractor_key")
+        "duration": info.get("duration"),
+        "platform": info.get("extractor_key"),
+        "webpage_url": info.get("webpage_url")
     }
 
 # ======================================================
-# PROFILE / PAGE VIDEOS (FLAT LIST)
+# PROFILE (PAGINATED)
 # ======================================================
-
 @app.get("/profile")
-def profile(profile_url: str = Query(...)):
+def profile(
+    profile_url: str = Query(...),
+    page: int = Query(1, ge=1),
+    limit: int = Query(24, ge=1, le=100)
+):
     """
-    Extract public video URLs from a profile/page.
-    Works for any yt-dlp supported platform.
+    Extract public videos from profile/page with pagination.
     """
 
-    opts = {
+    ydl_opts = {
         "quiet": True,
         "extract_flat": True,
         "skip_download": True,
-        "nocheckcertificate": True
+        "nocheckcertificate": True,
     }
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(profile_url, download=False)
     except Exception:
-        raise HTTPException(400, "Unable to extract profile data")
+        raise HTTPException(400, "Unable to extract profile")
 
-    profile_name = clean_name(
-        info.get("uploader") or info.get("title") or "profile"
-    )
+    entries = [e for e in info.get("entries", []) if e and e.get("url")]
+    total = len(entries)
+
+    start = (page - 1) * limit
+    end = start + limit
+    sliced = entries[start:end]
 
     videos = []
-    for i, e in enumerate(info.get("entries", []), start=1):
-        if e and e.get("url"):
-            videos.append({
-                "index": i,
-                "url": e["url"],
-                "title": e.get("title"),
-                "thumbnail": e.get("thumbnail")
-            })
+    for i, e in enumerate(sliced, start=start + 1):
+        videos.append({
+            "index": i,
+            "url": e["url"],
+            "thumbnail": e.get("thumbnail")
+        })
 
     return {
-        "profile": profile_name,
-        "total": len(videos),
+        "profile": clean_name(info.get("uploader") or info.get("title") or "profile"),
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "has_next": end < total,
         "videos": videos
     }
 
 # ======================================================
-# SINGLE VIDEO DOWNLOAD
+# DOWNLOAD (SINGLE VIDEO)
 # ======================================================
-
 @app.get("/download")
 def download(
     url: str = Query(...),
@@ -149,22 +135,24 @@ def download(
     profile: str = Query(...),
     quality: str = Query("best")
 ):
-    """
-    Download a single public video.
-    """
-
     tmp = tempfile.mkdtemp()
-    path = os.path.join(tmp, f"{index}.mp4")
+    filename = f"{index}.mp4"
+    path = os.path.join(tmp, filename)
 
-    opts = base_ydl()
-    opts.update({
+    ydl_opts = {
+        "quiet": True,
+        "noplaylist": True,
         "outtmpl": path,
         "merge_output_format": "mp4",
-        "format": quality
-    })
+        "format": quality,
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0"
+        }
+    }
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception:
         raise HTTPException(400, "Download failed")
@@ -172,12 +160,12 @@ def download(
     if not os.path.exists(path):
         raise HTTPException(400, "File not created")
 
-    filename = f"{clean_name(profile)}_{index}.mp4"
+    safe_profile = clean_name(profile)
 
     return StreamingResponse(
         stream_and_cleanup(path, tmp),
         media_type="video/mp4",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"'
+            "Content-Disposition": f'attachment; filename="{safe_profile}_{index}.mp4"'
         }
-        )
+    )
