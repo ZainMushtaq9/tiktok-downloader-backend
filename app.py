@@ -90,30 +90,69 @@ def tiktok_profile(profile_url: str = Query(...)):
 @app.get("/tiktok/single")
 def tiktok_single(url: str = Query(...)):
     if "tiktok.com" not in url:
-        raise HTTPException(400, "Invalid TikTok video URL")
+        raise HTTPException(400, "Invalid TikTok URL")
 
     tmp = tempfile.mkdtemp()
-    path = os.path.join(tmp, "tiktok.mp4")
+    path = os.path.join(tmp, "%(title)s.%(ext)s")
 
-    opts = base_ydl()
-    opts["outtmpl"] = path
+    opts = {
+        "quiet": True,
+        "nocheckcertificate": True,
+        "outtmpl": path,
+        "merge_output_format": "mp4",
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        },
+        "format": "mp4",
+    }
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
 
-    if not os.path.exists(path):
-        raise HTTPException(400, "TikTok download failed")
+        filename = ydl.prepare_filename(info)
+        if not os.path.exists(filename):
+            raise Exception("File not created")
 
-    return StreamingResponse(
-        stream_and_cleanup(path, tmp),
-        media_type="video/mp4",
-        headers={"Content-Disposition": 'attachment; filename="tiktok.mp4"'}
-    )
+        return StreamingResponse(
+            stream_and_cleanup(filename, tmp),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": f'attachment; filename="{clean_filename(info.get("title","tiktok"))}.mp4"'
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(500, f"TikTok processing failed")
 
 # ======================================================
 # YOUTUBE
 # ======================================================
+@app.get("/tiktok/preview")
+def tiktok_preview(url: str = Query(...)):
+    if "tiktok.com" not in url:
+        raise HTTPException(400, "Invalid TikTok URL")
 
+    opts = {
+        "quiet": True,
+        "skip_download": True,
+        "nocheckcertificate": True,
+        "extract_flat": False,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0"
+        }
+    }
+
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    return {
+        "title": info.get("title"),
+        "uploader": info.get("uploader"),
+        "thumbnail": info.get("thumbnail"),
+        "duration": info.get("duration"),
+        "webpage_url": info.get("webpage_url")
+    }
 @app.get("/youtube/info")
 def youtube_info(url: str = Query(...)):
     if "youtube.com" not in url and "youtu.be" not in url:
