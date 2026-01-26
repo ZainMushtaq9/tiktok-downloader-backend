@@ -70,7 +70,24 @@ def preview(url: str = Query(...)):
         "duration": info.get("duration"),
         "webpage_url": info.get("webpage_url"),
     }
-
+def quick_preview(url: str):
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "socket_timeout": 6,
+        "nocheckcertificate": True,
+        "extract_flat": False,
+        "http_headers": {"User-Agent": "Mozilla/5.0"},
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        return {
+            "title": info.get("title"),
+            "thumbnail": info.get("thumbnail"),
+        }
+    except:
+        return {"title": None, "thumbnail": None}
 # ======================================================
 # PROFILE (CLEAR BLOCK DETECTION)
 # ======================================================
