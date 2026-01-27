@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+0lfrom fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import yt_dlp
@@ -133,51 +133,187 @@ def profile(
             info = ydl.extract_info(profile_url, download=False)
     except:
         raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "PROFILE_BLOCKED",
-                "message": "This TikTok profile does not allow public access."
-            }
-        )
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+import yt_dlp
+import tempfile
+import os
+import re
 
-    entries = [e for e in info.get("entries", []) if e and e.get("url")]
+app = FastAPI(
+    title="TikTok Video Downloader API",
+    version="4.0-stable"
+)
 
-    if not entries:
+# ======================================================
+# CORS (Frontend Safe)
+# ======================================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ======================================================
+# HELPERS
+# ======================================================
+def clean_name(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]", "_", text or "")
+
+
+def stream_and_cleanup(path: str, tmp: str):
+    with open(path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            yield chunk
+    try:
+        os.remove(path)
+        os.rmdir(tmp)
+    except:
+        pass
+
+
+def extract_single_video_meta(url: str):
+    """
+    SAFE: Single video metadata only
+    """
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "socket_timeout": 8,
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0"
+        }
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        return {
+            "title": info.get("title"),
+            "thumbnail": info.get("thumbnail"),
+            "uploader": info.get("uploader"),
+            "duration": info.get("duration"),
+        }
+
+    except:
+        return None
+
+
+# ======================================================
+# HEALTH
+# ======================================================
+@app.get("/")
+def health():
+    return {
+        "status": "ok",
+        "service": "tiktok-downloader",
+        "mode": "stable"
+    }
+
+
+# ======================================================
+# SINGLE VIDEO PREVIEW
+# ======================================================
+@app.get("/preview")
+def preview(url: str = Query(...)):
+    meta = extract_single_video_meta(url)
+
+    if not meta:
         raise HTTPException(
             status_code=422,
             detail={
-                "code": "NO_VIDEOS",
-                "message": "No public videos found on this profile."
+                "code": "VIDEO_UNAVAILABLE",
+                "message": "This TikTok video is private, restricted, or removed."
             }
         )
+
+    return {
+        "title": meta["title"] or "Public TikTok Video",
+        "uploader": meta["uploader"] or "Unknown",
+        "thumbnail": meta["thumbnail"],
+        "duration": meta["duration"],
+        "url": url,
+    }
+
+
+# ======================================================
+# PROFILE SCRAPE (LIGHTWEIGHT & SAFE)
+# ======================================================
+@app.get("/profile")
+def profile(
+    profile_url: str = Query(...),
+    page: int = Query(1, ge=1),
+    limit: int = Query(24, ge=1, le=50),
+):
+    """
+    IMPORTANT:
+    - Profile endpoint NEVER extracts video metadata
+    - Only returns video URLs + index
+    - This prevents TikTok blocking
+    """
+
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "forcejson": True,
+        "socket_timeout": 10,
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0"
+        }
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(profile_url, download=False)
+    except:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROFILE_FETCH_FAILED",
+                "message": "TikTok temporarily blocked profile listing. Try again later."
+            }
+        )
+
+    entries = info.get("entries") or []
+
+    if not entries:
+        return {
+            "profile": clean_name(info.get("uploader") or info.get("title") or "tiktok_profile"),
+            "total": 0,
+            "page": page,
+            "has_next": False,
+            "videos": []
+        }
 
     total = len(entries)
     start = (page - 1) * limit
     end = start + limit
 
     videos = []
-
-    for idx, e in enumerate(entries[start:end], start=start + 1):
-        meta = extract_video_meta(e["url"]) or {}
-
-        videos.append({
-            "index": idx,
-            "url": e["url"],
-            "title": meta.get("title") or "Public TikTok Video",
-            "thumbnail": meta.get("thumbnail"),
-        })
+    for i, e in enumerate(entries[start:end], start=start + 1):
+        if e.get("url"):
+            videos.append({
+                "index": i,
+                "url": e["url"]
+            })
 
     return {
-        "profile": clean_name(info.get("uploader") or info.get("title")),
+        "profile": clean_name(info.get("uploader") or info.get("title") or "tiktok_profile"),
         "total": total,
         "page": page,
-        "limit": limit,
         "has_next": end < total,
         "videos": videos
     }
 
+
 # ======================================================
-# DOWNLOAD (ONE VIDEO PER REQUEST)
+# DOWNLOAD (DIRECT VIDEO ONLY)
 # ======================================================
 @app.get("/download")
 def download(
@@ -185,10 +321,6 @@ def download(
     index: int = Query(...),
     profile: str = Query(...),
 ):
-    """
-    One request = one video
-    Frontend controls queue / selection
-    """
     if "/video/" not in url and "vt.tiktok.com" not in url:
         raise HTTPException(
             status_code=400,
@@ -228,7 +360,7 @@ def download(
     if not os.path.exists(path):
         raise HTTPException(
             status_code=500,
-            detail="Download failed. File not created."
+            detail="Download failed. File was not created."
         )
 
     return StreamingResponse(
