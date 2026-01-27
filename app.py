@@ -1,6 +1,3 @@
-_name(profile)}_{index}.mp4"'
-        }
-        )
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,10 +6,13 @@ import tempfile
 import os
 import re
 
-app = FastAPI(title="Universal Video Downloader API", version="3.1")
+app = FastAPI(
+    title="TikTok Video Downloader API",
+    version="3.2-stable"
+)
 
 # ======================================================
-# CORS
+# CORS (Frontend Safe)
 # ======================================================
 app.add_middleware(
     CORSMiddleware,
@@ -39,17 +39,16 @@ def stream_and_cleanup(path: str, tmp: str):
         pass
 
 
-def fetch_preview(url: str):
+def extract_video_meta(url: str):
     """
-    Fetch title + thumbnail for a single TikTok video.
-    Used by both /preview and /profile (per video).
+    Extract title + thumbnail for ONE TikTok video
+    Used by /preview and /profile internally
     """
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
         "socket_timeout": 8,
         "nocheckcertificate": True,
-        "extract_flat": False,
         "http_headers": {
             "User-Agent": "Mozilla/5.0"
         }
@@ -74,7 +73,6 @@ def fetch_preview(url: str):
             "duration": None,
         }
 
-
 # ======================================================
 # HEALTH
 # ======================================================
@@ -82,24 +80,23 @@ def fetch_preview(url: str):
 def health():
     return {
         "status": "ok",
-        "service": "video-downloader",
-        "version": "phase-3-stable"
+        "platform": "tiktok",
+        "version": "3.2-stable"
     }
-
 
 # ======================================================
 # SINGLE VIDEO PREVIEW
 # ======================================================
 @app.get("/preview")
 def preview(url: str = Query(...)):
-    meta = fetch_preview(url)
+    meta = extract_video_meta(url)
 
     if not meta["title"] and not meta["thumbnail"]:
         raise HTTPException(
             status_code=422,
             detail={
-                "code": "VIDEO_BLOCKED",
-                "message": "This video cannot be previewed. It may be private, restricted, or removed."
+                "code": "VIDEO_UNAVAILABLE",
+                "message": "This TikTok video is private, restricted, or removed."
             }
         )
 
@@ -108,12 +105,11 @@ def preview(url: str = Query(...)):
         "uploader": meta["uploader"] or "Unknown",
         "thumbnail": meta["thumbnail"],
         "duration": meta["duration"],
-        "webpage_url": url,
+        "url": url,
     }
 
-
 # ======================================================
-# PROFILE (WITH GUARANTEED PREVIEW DATA)
+# PROFILE SCRAPE (WITH PREVIEW DATA)
 # ======================================================
 @app.get("/profile")
 def profile(
@@ -140,7 +136,7 @@ def profile(
             status_code=422,
             detail={
                 "code": "PROFILE_BLOCKED",
-                "message": "This TikTok profile restricts automated access."
+                "message": "This TikTok profile does not allow public access."
             }
         )
 
@@ -151,7 +147,7 @@ def profile(
             status_code=422,
             detail={
                 "code": "PROFILE_EMPTY",
-                "message": "No publicly accessible videos were found."
+                "message": "No public videos found on this profile."
             }
         )
 
@@ -162,26 +158,25 @@ def profile(
     videos = []
 
     for i, e in enumerate(entries[start:end], start=start + 1):
-        preview = fetch_preview(e["url"])
+        meta = extract_video_meta(e["url"])
 
         videos.append({
             "index": i,
             "url": e["url"],
-            "title": preview["title"],
-            "thumbnail": preview["thumbnail"],
+            "title": meta["title"] or "Public TikTok Video",
+            "thumbnail": meta["thumbnail"],
         })
 
     return {
-        "profile": clean_name(info.get("uploader") or info.get("title") or "profile"),
+        "profile": clean_name(info.get("uploader") or info.get("title") or "tiktok_profile"),
         "total": total,
         "page": page,
         "has_next": end < total,
         "videos": videos
     }
 
-
 # ======================================================
-# DOWNLOAD (STRICT URL VALIDATION)
+# DOWNLOAD (DIRECT VIDEO ONLY)
 # ======================================================
 @app.get("/download")
 def download(
@@ -193,8 +188,8 @@ def download(
         raise HTTPException(
             status_code=400,
             detail={
-                "code": "INVALID_DOWNLOAD_URL",
-                "message": "Only direct TikTok video URLs can be downloaded."
+                "code": "INVALID_URL",
+                "message": "Only direct TikTok video URLs are supported."
             }
         )
 
@@ -221,14 +216,14 @@ def download(
             status_code=422,
             detail={
                 "code": "DOWNLOAD_FAILED",
-                "message": "TikTok blocked the download request."
+                "message": "TikTok blocked this download request."
             }
         )
 
     if not os.path.exists(path):
         raise HTTPException(
             status_code=500,
-            detail="Download failed: file not created."
+            detail="Download failed. File was not created."
         )
 
     return StreamingResponse(
@@ -238,4 +233,4 @@ def download(
             "Content-Disposition":
                 f'attachment; filename="{clean_name(profile)}_{index}.mp4"'
         }
-    )
+            )
