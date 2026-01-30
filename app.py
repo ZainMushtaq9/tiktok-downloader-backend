@@ -2,6 +2,9 @@
 Video Downloader Tools - Backend API
 Production-ready FastAPI application for multi-platform video processing
 Supports: TikTok, YouTube, Instagram, Facebook, Likee
+
+GitHub: https://github.com/ZainMushtaq9/tiktok-downloader-backend
+Deployed on: Railway
 """
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -197,9 +200,11 @@ def get_ydl_opts(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    logger.info("Video Downloader API starting up...")
+    logger.info("🚀 Video Downloader API starting up...")
+    logger.info("📍 Deployed on Railway")
+    logger.info("🔗 GitHub: https://github.com/ZainMushtaq9/tiktok-downloader-backend")
     yield
-    logger.info("Video Downloader API shutting down...")
+    logger.info("👋 Video Downloader API shutting down...")
 
 # =====================================================
 # FASTAPI APPLICATION
@@ -208,13 +213,20 @@ app = FastAPI(
     title="Video Downloader Tools API",
     description="Multi-platform video processing API supporting TikTok, YouTube, Instagram, Facebook, and Likee",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# CORS Configuration
+# CORS Configuration - Allow your frontend domain
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify actual domains
+    allow_origins=[
+        "*",  # For development
+        "https://zainmushtaq9.github.io",  # Your GitHub Pages domain
+        "https://tiktok-downloader-ui.vercel.app",  # If using Vercel
+        "https://tiktok-downloader-ui.netlify.app",  # If using Netlify
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -243,7 +255,9 @@ async def root():
         "status": "operational",
         "service": "Video Downloader Tools API",
         "version": "2.0.0",
-        "supported_platforms": list(config.SUPPORTED_PLATFORMS.values())
+        "supported_platforms": list(config.SUPPORTED_PLATFORMS.values()),
+        "github": "https://github.com/ZainMushtaq9/tiktok-downloader-backend",
+        "frontend": "https://github.com/ZainMushtaq9/tiktok-downloader-ui"
     }
 
 @app.get("/health")
@@ -252,7 +266,8 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "rate_limiter_active_ips": len(rate_limiter.requests)
+        "rate_limiter_active_ips": len(rate_limiter.requests),
+        "deployed_on": "Railway"
     }
 
 @app.get("/preview")
@@ -485,4 +500,5 @@ async def download_video(
 # =====================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
